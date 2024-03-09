@@ -1,0 +1,7 @@
+services:
+  tunnel:
+    build: .
+    environment:
+      IMESSAGE_RECIPIENT: ""
+    ports:
+      - 8080:8080
