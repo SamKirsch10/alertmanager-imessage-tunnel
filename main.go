@@ -24,7 +24,7 @@ func main() {
 			return
 		}
 		var (
-			payloadIn  AlertmanagerPayload
+			payloadIn  interface{}
 			payloadOut iMessagePayload
 		)
 		if err := json.Unmarshal(body, &payloadIn); err != nil {
@@ -57,14 +57,19 @@ func main() {
 	log.Fatal(srv.ListenAndServe())
 }
 
-func formatMessage(in AlertmanagerPayload, sendTo string) iMessagePayload {
+func formatMessage(input interface{}, sendTo string) iMessagePayload {
 	out := new(iMessagePayload)
-	for _, alert := range in.Alerts {
-		out.Body.Message = fmt.Sprintf("[%s][%s] %s\n%s\n",
-			alert.Labels["alertname"],
-			alert.Status, alert.Annotations["description"],
-			alert.GeneratorURL,
-		)
+	switch in := input.(type) {
+	case GrafanaAlertPayload:
+		out.Body.Message = fmt.Sprintf("[%s] %s %s", in.State, in.RuleName, in.Message)
+	case AlertmanagerPayload:
+		for _, alert := range in.Alerts {
+			out.Body.Message = fmt.Sprintf("[%s][%s] %s\n%s\n",
+				alert.Labels["alertname"],
+				alert.Status, alert.Annotations["description"],
+				alert.GeneratorURL,
+			)
+		}
 	}
 	out.Recipient.Handle = sendTo
 
@@ -119,4 +124,26 @@ type AlertmanagerPayload struct {
 		GeneratorURL string            `json:"generatorURL"`
 		Fingerprint  string            `json:"fingerprint"`
 	} `json:"alerts"`
+}
+
+type GrafanaAlertPayload struct {
+	DashboardID int `json:"dashboardId"`
+	EvalMatches []struct {
+		Value  int    `json:"value"`
+		Metric string `json:"metric"`
+		Tags   struct {
+		} `json:"tags"`
+	} `json:"evalMatches"`
+	ImageURL string `json:"imageUrl"`
+	Message  string `json:"message"`
+	OrgID    int    `json:"orgId"`
+	PanelID  int    `json:"panelId"`
+	RuleID   int    `json:"ruleId"`
+	RuleName string `json:"ruleName"`
+	RuleURL  string `json:"ruleUrl"`
+	State    string `json:"state"`
+	Tags     struct {
+		TagName string `json:"tag name"`
+	} `json:"tags"`
+	Title string `json:"title"`
 }
