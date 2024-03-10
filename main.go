@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/davecgh/go-spew/spew"
 	"github.com/gorilla/mux"
 )
 
@@ -17,32 +19,13 @@ const serverString = "0.0.0.0:8080"
 
 func main() {
 	r := mux.NewRouter()
-	r.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		var (
-			payloadIn  interface{}
-			payloadOut iMessagePayload
-		)
-		if err := json.Unmarshal(body, &payloadIn); err != nil {
-			log.Printf("got bad req: %s\n", body)
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		sendTo := os.Getenv("IMESSAGE_RECIPIENT")
-		if sendTo == "" {
-			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte("recipient env var is not set on server!"))
-			return
-		}
-		payloadOut = formatMessage(payloadIn, sendTo)
-		if err := sendMessage(payloadOut); err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte(err.Error()))
-		}
+	r.HandleFunc("/grafana", func(w http.ResponseWriter, r *http.Request) {
+		var payloadIn GrafanaAlertPayload
+		processRequest(&payloadIn, w, r)
+	})
+	r.HandleFunc("/alertmanager", func(w http.ResponseWriter, r *http.Request) {
+		var payloadIn AlertmanagerPayload
+		processRequest(&payloadIn, w, r)
 	})
 
 	srv := http.Server{
@@ -57,23 +40,33 @@ func main() {
 	log.Fatal(srv.ListenAndServe())
 }
 
-func formatMessage(input interface{}, sendTo string) iMessagePayload {
+func formatMessage(input interface{}, sendTo string) (iMessagePayload, error) {
 	out := new(iMessagePayload)
-	switch in := input.(type) {
-	case GrafanaAlertPayload:
-		out.Body.Message = fmt.Sprintf("[%s] %s %s", in.State, in.RuleName, in.Message)
+	switch i := input.(type) {
 	case AlertmanagerPayload:
-		for _, alert := range in.Alerts {
-			out.Body.Message = fmt.Sprintf("[%s][%s] %s\n%s\n",
+		log.Println("detected alertmanager payload")
+		for _, alert := range i.Alerts {
+			out.Body.Message += fmt.Sprintf("[%s][%s] %s\n%s\n",
 				alert.Labels["alertname"],
 				alert.Status, alert.Annotations["description"],
 				alert.GeneratorURL,
 			)
 		}
+	case GrafanaAlertPayload:
+		log.Println("detected grafana alert payload")
+		for _, alert := range i.Alerts {
+			log.Printf("processing alert %s", alert.Labels["alertname"])
+			out.Body.Message += fmt.Sprintf("[%s] %s %s\n", alert.Status, alert.Labels["alertname"], alert.GeneratorURL)
+		}
+	}
+	if out.Body.Message == "" {
+		j, _ := json.Marshal(input)
+		log.Printf("\n--------------\n%s\n--------------\n", j)
+		return *out, errors.New("unknown type received. or not alerts found. cannot build msg.")
 	}
 	out.Recipient.Handle = sendTo
 
-	return *out
+	return *out, nil
 }
 
 func sendMessage(in iMessagePayload) error {
@@ -83,7 +76,10 @@ func sendMessage(in iMessagePayload) error {
 	}
 
 	jsonStr, _ := json.Marshal(in)
-	req, _ := http.NewRequest("POST", "http://192.168.1.12:3005/message", bytes.NewBuffer(jsonStr))
+	req, err := http.NewRequest("POST", "http://192.168.1.12:3005/message", bytes.NewBuffer(jsonStr))
+	if err != nil {
+		return err
+	}
 	client := http.DefaultClient
 	resp, err := client.Do(req)
 	if err != nil {
@@ -94,6 +90,37 @@ func sendMessage(in iMessagePayload) error {
 		return fmt.Errorf("unexpected response from imessage server: %s", body)
 	}
 	return nil
+}
+
+func processRequest(payloadIn interface{}, w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	if err := json.Unmarshal(body, &payloadIn); err != nil {
+		log.Printf("got bad req: %v\n%s\n", err, body)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	sendTo := os.Getenv("IMESSAGE_RECIPIENT")
+	if sendTo == "" {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("recipient env var is not set on server!"))
+		return
+	}
+	payloadOut, err := formatMessage(payloadIn, sendTo)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(fmt.Sprintf("%v", err)))
+		return
+	}
+	spew.Dump(payloadOut)
+	if err := sendMessage(payloadOut); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		log.Printf("error sending msg: %v", err)
+		w.Write([]byte(err.Error()))
+	}
 }
 
 type iMessagePayload struct {
@@ -127,23 +154,30 @@ type AlertmanagerPayload struct {
 }
 
 type GrafanaAlertPayload struct {
-	DashboardID int `json:"dashboardId"`
-	EvalMatches []struct {
-		Value  int    `json:"value"`
-		Metric string `json:"metric"`
-		Tags   struct {
-		} `json:"tags"`
-	} `json:"evalMatches"`
-	ImageURL string `json:"imageUrl"`
-	Message  string `json:"message"`
+	Receiver string `json:"receiver"`
+	Status   string `json:"status"`
 	OrgID    int    `json:"orgId"`
-	PanelID  int    `json:"panelId"`
-	RuleID   int    `json:"ruleId"`
-	RuleName string `json:"ruleName"`
-	RuleURL  string `json:"ruleUrl"`
-	State    string `json:"state"`
-	Tags     struct {
-		TagName string `json:"tag name"`
-	} `json:"tags"`
-	Title string `json:"title"`
+	Alerts   []struct {
+		Status       string            `json:"status"`
+		Labels       map[string]string `json:"labels"`
+		Annotations  map[string]string `json:"annotations"`
+		StartsAt     string            `json:"startsAt"`
+		EndsAt       string            `json:"endsAt"`
+		GeneratorURL string            `json:"generatorURL"`
+		Fingerprint  string            `json:"fingerprint"`
+		SilenceURL   string            `json:"silenceURL"`
+		DashboardURL string            `json:"dashboardURL"`
+		PanelURL     string            `json:"panelURL"`
+		Values       map[string]any    `json:"values"`
+	} `json:"alerts"`
+	GroupLabels       map[string]string `json:"groupLabels"`
+	CommonLabels      map[string]string `json:"commonLabels"`
+	CommonAnnotations map[string]string `json:"commonAnnotations"`
+	ExternalURL       string            `json:"externalURL"`
+	Version           string            `json:"version"`
+	GroupKey          string            `json:"groupKey"`
+	TruncatedAlerts   int               `json:"truncatedAlerts"`
+	Title             string            `json:"title"`
+	State             string            `json:"state"`
+	Message           string            `json:"message"`
 }
