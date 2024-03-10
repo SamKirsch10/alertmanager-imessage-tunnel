@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -43,7 +42,7 @@ func main() {
 func formatMessage(input interface{}, sendTo string) (iMessagePayload, error) {
 	out := new(iMessagePayload)
 	switch i := input.(type) {
-	case AlertmanagerPayload:
+	case *AlertmanagerPayload:
 		log.Println("detected alertmanager payload")
 		for _, alert := range i.Alerts {
 			out.Body.Message += fmt.Sprintf("[%s][%s] %s\n%s\n",
@@ -52,17 +51,16 @@ func formatMessage(input interface{}, sendTo string) (iMessagePayload, error) {
 				alert.GeneratorURL,
 			)
 		}
-	case GrafanaAlertPayload:
+	case *GrafanaAlertPayload:
 		log.Println("detected grafana alert payload")
 		for _, alert := range i.Alerts {
 			log.Printf("processing alert %s", alert.Labels["alertname"])
 			out.Body.Message += fmt.Sprintf("[%s] %s %s\n", alert.Status, alert.Labels["alertname"], alert.GeneratorURL)
 		}
-	}
-	if out.Body.Message == "" {
+	default:
 		j, _ := json.Marshal(input)
 		log.Printf("\n--------------\n%s\n--------------\n", j)
-		return *out, errors.New("unknown type received. or not alerts found. cannot build msg.")
+		return *out, fmt.Errorf("unknown type %T received. or not alerts found. cannot build msg", i)
 	}
 	out.Recipient.Handle = sendTo
 
@@ -113,12 +111,13 @@ func processRequest(payloadIn interface{}, w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(fmt.Sprintf("%v", err)))
+		log.Printf("error formatting msg: %v\n", err)
 		return
 	}
 	spew.Dump(payloadOut)
 	if err := sendMessage(payloadOut); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		log.Printf("error sending msg: %v", err)
+		log.Printf("error sending msg: %v\n", err)
 		w.Write([]byte(err.Error()))
 	}
 }
